@@ -85,8 +85,8 @@ if __name__ == '__main__':
     dataloader = DataLoader(protein_dataset, batch_size=4, shuffle=False, num_workers=4)
     print(protein_dataset.protein_list[0])  
     for i, sample_batched in enumerate(dataloader):
+        print(i)
         features, SS8, ACC, lengths = sample_batched
         print(features.size())
         print(SS8.size())
         print(ACC.size())
-        break

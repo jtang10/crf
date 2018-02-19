@@ -13,7 +13,7 @@ from tensorboardX import SummaryWriter
 from data_loading import Protein_Dataset
 from mufold import MUFold_ss
 from resnet import Inception_ResNet
-from crf import *
+from model import *
 from utils import *
 
 parser = argparse.ArgumentParser(description='PyTorch implementation of Mufold-ss paper')
@@ -22,7 +22,7 @@ parser.add_argument('model', choices=['mufold', 'resnet'], help='choose model be
 parser.add_argument('optimizer', choices=['sgd', 'adam'], default='adam', help='choose optimizer')
 parser.add_argument('init', choices=['uniform', 'normal', 'none'])
 parser.add_argument('-l', '--local', action='store_false', default=True, help='if specified, use local data root')
-parser.add_argument('--dnet_config', default=(6, 12, 24, 16), nargs='+', type=int, help='how many layers in each pooling block')
+parser.add_argument('--n_cnn', default=4, type=int, help='number of resnet layers')
 parser.add_argument('--crf', action='store_true', default=False, help="If specified, CRF will be added after nn")
 parser.add_argument('-e', '--epochs', default=15, type=int, metavar='N', help='number of epochs to run (default: 15)')
 parser.add_argument('-b', '--batch_size', default=64, type=int, metavar='N', help='batch size of training data (default: 64)')
@@ -76,8 +76,9 @@ save_model_dir = os.path.join(os.getcwd(), "saved_model", model_name)
 writer_path = os.path.join("logger", model_name, args.run)
 if not os.path.exists(save_model_dir):
     os.makedirs(save_model_dir)
-model_name = [model_name, 'epochs', str(args.epochs), args.optimizer,
-              'lr', str(args.lr), 'dropout', str(args.dropout)]
+model_name = [model_name, args.run, args.init, 'epochs', str(args.epochs),
+              args.optimizer, 'lr', str(args.lr), 'b', str(args.batch_size),
+              'dropout', str(args.dropout)]
 model_name = '_'.join(model_name)
 model_path = os.path.join(save_model_dir, model_name)
 if args.clean:
@@ -91,9 +92,9 @@ print('model_name:', model_name)
 
 
 if args.crf:
-    model = CNN_CRF(args.dropout, args.model)
+    model = CNN_CRF(args.dropout, args.model, args.n_cnn)
 else:
-    model = Inception_ResNet() if args.model == 'resnet' else MUFold_ss(dropout=args.dropout)
+    model = Inception_ResNet(n_cnn=args.n_cnn) if args.model == 'resnet' else MUFold_ss(dropout=args.dropout)
 
 if args.optimizer == 'adam':
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -126,6 +127,7 @@ best_valid_acc = 0
 patience = 0
 len_train = len(train_dataset)
 len_valid = len(valid_dataset)
+len_test = len(test_dataset)
 start = time.time()
 
 for epoch in range(args.epochs):
@@ -138,23 +140,32 @@ for epoch in range(args.epochs):
         max_length = max(lengths)
         features = cuda_var_wrapper(features[:, :, :max_length])
         labels = cuda_var_wrapper(labels[:, :max_length])
+        lengths = cuda_var_wrapper(lengths)
         if args.crf:
-            output = model(features, lengths)
+            cnn_output, output = model(features, lengths)
             loss = model.forward_alg(features, labels, lengths)
         else:
             output = model(features)
             loss = criterion(output.contiguous().view(-1, 8), labels.contiguous().view(-1))
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         t_train1 = time.time() - start_epoch
-        correct_batch, total_batch, loss_batch = eval(model, features, labels, lengths, args.crf, criterion)
-        loss_train += loss_batch
+        correct_batch, total_batch = get_batch_accuracy(labels, output, lengths)
+        loss_train += loss.data[0] * args.batch_size
         correct_train += correct_batch
         total_train += total_batch
-        if i % 20 == 0 and args.verbose:
-            print ('Epoch [{}/{}], Batch_time: {:.2f}, Iter [{}/{}], Loss: {:.4f}' \
-               .format(epoch+1, args.epochs, time.time() - start_epoch, i, len_train//args.batch_size, loss.data[0]))
+        niter = epoch * len_train + i * args.batch_size
+        if i % 10 == 0:
+            if args.crf:
+                parameter_summary(writer, 'cnn_output', cnn_output, niter)
+                parameter_summary(writer, 'crf_param', crf_param(model), niter)
+            else:
+                parameter_summary(writer, 'cnn_output', output, niter)
+            if args.verbose:
+                print ('Epoch [{}/{}], Batch_time: {:.2f}, Iter [{}/{}], Loss: {:.4f}' \
+                   .format(epoch+1, args.epochs, time.time() - start_epoch, i, len_train//args.batch_size, loss.data[0]))
 
     accuracy_train = correct_train / total_train
     accuracy_valid, loss_valid = evaluate(model, valid_loader, args.crf, criterion)
@@ -182,23 +193,23 @@ for epoch in range(args.epochs):
 
 print("Time spent on training: {:.2f}s".format(time.time() - start))
 print("Best validation accuracy: {:.4f}".format(best_valid_acc))
-# torch.save(model.state_dict(), model_path)
+torch.save(model.state_dict(), model_path)
 writer.close()
 
 model.load_state_dict(torch.load(model_path + '_best'))
-accuracy_test, _ = evaluate(model, test_loader, args.crf, criterion)
-accuracy_CASP11, _ = evaluate(model, CASP11_loader, args.crf, criterion)
-accuracy_CASP12, _ = evaluate(model, CASP12_loader, args.crf, criterion)
+accuracy_test, _, p_test, r_test, f1_test = evaluate(model, test_loader, args.crf, criterion, f1=True)
+accuracy_CASP11, _, p_11, r_11, f1_11 = evaluate(model, CASP11_loader, args.crf, criterion, f1=True)
+accuracy_CASP12, _, p_12, r_12, f1_12 = evaluate(model, CASP12_loader, args.crf, criterion, f1=True)
 print("Model for best validation accuracy:")
-print("Test accuracy {:.3f}".format(accuracy_test))
-print("CASP11 accuracy {:.3f}".format(accuracy_CASP11))
-print("CASP12 accuracy {:.3f}".format(accuracy_CASP12))
+print("Test accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_test, p_test, r_test, f1_test))
+print("CASP11 accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_CASP11, p_11, r_11, f1_11))
+print("CASP12 accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_CASP12, p_12, r_12, f1_12))
 
-# model.load_state_dict(torch.load(model_path))
-# accuracy_test, _ = evaluate(model, test_loader, args.crf, criterion)
-# accuracy_CASP11, _ = evaluate(model, CASP11_loader, args.crf, criterion)
-# accuracy_CASP12, _ = evaluate(model, CASP12_loader, args.crf, criterion)
-# print("Model for complete training:")
-# print("Test accuracy {:.3f}".format(accuracy_test))
-# print("CASP11 accuracy {:.3f}".format(accuracy_CASP11))
-# print("CASP12 accuracy {:.3f}".format(accuracy_CASP12))
+model.load_state_dict(torch.load(model_path))
+accuracy_test, _, p_test, r_test, f1_test = evaluate(model, test_loader, args.crf, criterion, f1=True)
+accuracy_CASP11, _, p_11, r_11, f1_11 = evaluate(model, CASP11_loader, args.crf, criterion, f1=True)
+accuracy_CASP12, _, p_12, r_12, f1_12 = evaluate(model, CASP12_loader, args.crf, criterion, f1=True)
+print("Model for best validation accuracy:")
+print("Test accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_test, p_test, r_test, f1_test))
+print("CASP11 accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_CASP11, p_11, r_11, f1_11))
+print("CASP12 accuracy {:.3f}, precision/recall/f1: {:.3f},{:.3f},{:.3f}".format(accuracy_CASP12, p_12, r_12, f1_12))

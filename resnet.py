@@ -65,35 +65,18 @@ class Inception_A(nn.Module):
         return output
 
 
-class Inception_B(nn.Module):
-    def __init__(self, in_channels, out_channels, scale=0.1):
-        super(Inception_A, self).__init__()
-        self.scale = scale
-        self.branch1 = Conv1D_BN_ReLU(in_channels, 192, 1, 1, 0)
-        self.branch2 = nn.Sequential(Conv1D_BN_ReLU(in_channels, 128, 1, 1, 0),
-                                     Conv1D_BN_ReLU(128, 192, 5, 1, 2))
-        self.branch3 = nn.Sequential(Conv1D_BN_ReLU(in_channels, 128, 1, 1, 0),
-                                     Conv1D_BN_ReLU(128, 192, 7, 1, 3))
-        self.conv1_cat = Conv1D_BN_ReLU(576, 1154, 1, 1, 0)
-        self.conv1_x = Conv1D_BN_ReLU(in_channels, 1154, 1, 1, 0)
-
-    def forward(self, x):
-        residual = torch.cat(self.branch1(x), self.branch2(x), self.branch3(x))
-        output = self.conv1_cat(residual) * self.scale + self.conv1_x(x)
-        return output
-
-
 class Inception_ResNet(nn.Module):
-    def __init__(self, output_size=8):
+    def __init__(self, output_size=8, n_cnn=4):
         super(Inception_ResNet, self).__init__()
         self.stem = Stem(66, 384)
-        self.inceptions = nn.ModuleList([Inception_A(384) for i in range(4)])
+        self.inceptions = nn.ModuleList([Inception_A(384) for i in range(n_cnn)])
         self.linear = nn.Linear(384, output_size)
 
     def forward(self, x):
         output = self.stem(x)
         for i, inception in enumerate(self.inceptions):
             output = inception(output)
+        print(output.size())
         output = self.linear(output.permute(0, 2, 1))
         return output
 
@@ -111,9 +94,11 @@ def get_n_params(model):
 
 if __name__ == '__main__':
     img = torch.autograd.Variable(torch.randn(8, 66, 698))
-    model = Inception_ResNet()
+    model = Inception_ResNet(n_cnn=0)
+    for child in model.children():
+        print(child)
     # stem = Stem(66, 384)
     # inception = Inception_A(384, 384)
-    print("Number of trainable parameters", get_n_params(model))
+    # print("Number of trainable parameters", get_n_params(model))
     output = model(img)
     print(output.size())
